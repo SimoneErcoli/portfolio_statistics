@@ -8,7 +8,7 @@ import {
   formatNumber,
   formatPercent,
   toneClass
-} from "../lib/portfolio";
+} from "@/lib/portfolio";
 import {
   DrawdownChart as PortfolioDrawdownChart,
   EtfComparisonChart as PortfolioEtfComparisonChart,
@@ -697,6 +697,12 @@ export function PortfolioDashboard({ sampleData }) {
     setError("");
   }
 
+  function exportSamplePortfolio() {
+    downloadJsonFile("sample-portfolio.json", sampleData);
+    setFeedback("Dataset di esempio esportato in JSON.");
+    setError("");
+  }
+
   if (!analysis) {
     return (
       <main className="page-shell">
@@ -813,9 +819,9 @@ export function PortfolioDashboard({ sampleData }) {
             <button className="ghost-button" type="button" onClick={resetToEmptyPortfolio}>
               Nuovo portafoglio
             </button>
-            <a className="primary-link" href="/api/sample-portfolio">
+            <button className="primary-link" type="button" onClick={exportSamplePortfolio}>
               Scarica esempio
-            </a>
+            </button>
             <button className="ghost-button" type="button" onClick={exportCurrentPortfolio}>
               Scarica JSON corrente
             </button>

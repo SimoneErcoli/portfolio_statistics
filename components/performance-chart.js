@@ -1,4 +1,4 @@
-import { formatCompactCurrency, formatDateLabel, formatPercent } from "../lib/portfolio";
+import { formatCompactCurrency, formatDateLabel, formatPercent } from "@/lib/portfolio";
 
 const WIDE_CHART_WIDTH = 860;
 const WIDE_CHART_HEIGHT = 340;

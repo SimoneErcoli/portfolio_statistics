@@ -19,7 +19,7 @@ npm run dev
 
 Apri `http://localhost:3000`.
 
-All'avvio l'app parte da un portafoglio vuoto con `0` ETF, cosi l'utente puo costruirlo da interfaccia. Il dataset di esempio resta scaricabile da `/api/sample-portfolio`.
+All'avvio l'app parte da un portafoglio vuoto con `0` ETF, cosi l'utente puo costruirlo da interfaccia. Il dataset di esempio resta scaricabile dal pulsante `Scarica esempio`.
 
 Da interfaccia puoi:
 - aggiungere ETF al portafoglio iniziale
@@ -27,6 +27,22 @@ Da interfaccia puoi:
 - partire da `0` ETF e costruire il portafoglio da zero
 - esportare il JSON corrente con tutte le modifiche fatte da interfaccia
 - consultare grafici aggiuntivi come drawdown, rischio/rendimento e confronto crescita ETF
+
+## Build statica
+
+La build produce un export statico nella cartella `out/`:
+
+```bash
+npm run build
+```
+
+Il deploy e pensato per il path `/portfolio-statistics`, quindi asset e link interni vengono generati sotto quel prefisso, come nell'altro progetto `digital-vault`.
+
+Per GitHub Pages il file `public/.nojekyll` viene incluso nell'export, cosi la cartella `_next` non viene ignorata.
+
+Per provarla in locale non aprire `out/index.html` direttamente dal filesystem. La cartella `out/` va servita via HTTP.
+
+Se stai pubblicando su un hosting statico, il contenuto da distribuire resta semplicemente `out/`.
 
 ## Struttura del JSON
 
@@ -73,7 +89,7 @@ Dall'interfaccia puoi anche aggiungere nuovi ETF direttamente nell'editor del po
 
 Se `costBasis` non viene fornito, il sistema usa `shares * price` piu eventuali `fees`.
 
-Il progetto include un dataset di esempio in `src/data/sample-portfolio.json`, scaricabile anche da `/api/sample-portfolio`.
+Il progetto include un dataset di esempio in `data/sample-portfolio.json`, esportabile anche dal pulsante `Scarica esempio`.
 
 ## Metriche calcolate
 
