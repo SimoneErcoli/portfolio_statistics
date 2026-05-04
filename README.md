@@ -3,7 +3,7 @@
 Dashboard Next.js per analizzare un portafoglio di ETF partendo da un file JSON con:
 
 - metadati del portafoglio
-- portafoglio iniziale opzionale per ETF gia presenti
+- portafoglio iniziale opzionale per ETF gia presenti o aggiunti dall'editor
 - transazioni di acquisto/vendita
 - storico prezzi/performance per ogni ETF
 - dividendi opzionali per rendimenti piu accurati
@@ -52,6 +52,8 @@ Ogni ETF deve contenere almeno:
 ```
 
 `initialPosition` e opzionale e serve per rappresentare un ETF gia presente nel portafoglio all'inizio del periodo osservato.
+
+Dall'interfaccia puoi anche aggiungere nuovi ETF direttamente nell'editor del portafoglio iniziale. In quel caso il JSON esportato include una `performanceHistory` minima con un solo punto coerente col prezzo iniziale; per metriche complete conviene poi arricchire manualmente lo storico e le eventuali transazioni.
 
 - `date`: data iniziale del portafoglio per quell'ETF
 - `shares`: quote gia detenute

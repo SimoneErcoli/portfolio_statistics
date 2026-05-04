@@ -9,7 +9,12 @@ import {
   formatPercent,
   toneClass
 } from "../lib/portfolio";
-import { PerformanceChart } from "./performance-chart";
+import {
+  DrawdownChart as PortfolioDrawdownChart,
+  EtfComparisonChart as PortfolioEtfComparisonChart,
+  PerformanceChart,
+  RiskReturnChart as PortfolioRiskReturnChart
+} from "./performance-chart";
 
 const schemaSnippet = `{
   "portfolio": {
@@ -20,6 +25,7 @@ const schemaSnippet = `{
     {
       "id": "vwce",
       "ticker": "VWCE",
+      "name": "Vanguard FTSE All-World UCITS ETF",
       "initialPosition": {
         "date": "2024-12-31",
         "shares": 8,
@@ -57,12 +63,18 @@ function getSuggestedInitialDate(etf) {
   return dates.sort()[0] ?? "";
 }
 
-function buildInitialPositionEditorState(portfolioData) {
+function buildInitialPositionEditorState(portfolioData, customEtfIds = []) {
+  const customEtfIdSet = new Set(customEtfIds);
+
   return portfolioData.etfs.map((etf) => ({
     id: etf.id,
+    portfolioEtfId: etf.id,
     ticker: etf.ticker,
     name: etf.name,
+    isin: etf.isin ?? "",
+    assetClass: etf.assetClass ?? "",
     enabled: Boolean(etf.initialPosition),
+    isCustom: customEtfIdSet.has(etf.id),
     date: etf.initialPosition?.date ?? getSuggestedInitialDate(etf),
     shares:
       etf.initialPosition?.shares != null ? String(etf.initialPosition.shares) : "",
@@ -87,59 +99,200 @@ function normalizeOptionalNumber(value, label) {
   return parsed;
 }
 
-function buildPortfolioWithInitialPositions(portfolioData, initialPositionEditorState) {
-  const draftsById = new Map(initialPositionEditorState.map((draft) => [draft.id, draft]));
+function normalizeDraftText(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function getDraftLabel(draft) {
+  return normalizeDraftText(draft.ticker) || normalizeDraftText(draft.name) || "il nuovo ETF";
+}
+
+function createLocalDraftId() {
+  return `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createCustomEtfDraft() {
+  return {
+    id: createLocalDraftId(),
+    portfolioEtfId: null,
+    ticker: "",
+    name: "",
+    isin: "",
+    assetClass: "",
+    enabled: true,
+    isCustom: true,
+    date: "",
+    shares: "",
+    price: "",
+    costBasis: "",
+    fees: ""
+  };
+}
+
+function buildInitialPositionFromDraft(draft) {
+  const draftLabel = getDraftLabel(draft);
+
+  if (!draft.date.trim()) {
+    throw new Error(`Inserisci una data iniziale per ${draftLabel}.`);
+  }
+
+  const shares = normalizeOptionalNumber(draft.shares, `Le quote iniziali di ${draftLabel}`);
+  const price = normalizeOptionalNumber(draft.price, `Il prezzo iniziale di ${draftLabel}`);
+
+  if (shares == null || shares <= 0) {
+    throw new Error(`Le quote iniziali di ${draftLabel} devono essere maggiori di zero.`);
+  }
+
+  if (price == null || price <= 0) {
+    throw new Error(`Il prezzo iniziale di ${draftLabel} deve essere maggiore di zero.`);
+  }
+
+  const costBasis = normalizeOptionalNumber(
+    draft.costBasis,
+    `Il costo storico iniziale di ${draftLabel}`
+  );
+  const fees = normalizeOptionalNumber(draft.fees, `Le fee iniziali di ${draftLabel}`);
+
+  if (costBasis != null && costBasis < 0) {
+    throw new Error(`Il costo storico iniziale di ${draftLabel} non puo essere negativo.`);
+  }
+
+  if (fees != null && fees < 0) {
+    throw new Error(`Le fee iniziali di ${draftLabel} non possono essere negative.`);
+  }
 
   return {
-    ...portfolioData,
-    etfs: portfolioData.etfs.map((etf) => {
-      const draft = draftsById.get(etf.id);
+    date: draft.date.trim(),
+    shares,
+    price,
+    ...(costBasis != null ? { costBasis } : {}),
+    ...(fees != null ? { fees } : {})
+  };
+}
 
-      if (!draft || !draft.enabled) {
-        const { initialPosition, ...etfWithoutInitialPosition } = etf;
-        return etfWithoutInitialPosition;
+function slugifyEtfId(value) {
+  const normalized = normalizeDraftText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return normalized || "etf";
+}
+
+function buildUniqueEtfId(draft, usedIds) {
+  const baseId = slugifyEtfId(draft.ticker || draft.name);
+  let candidate = baseId;
+  let suffix = 2;
+
+  while (usedIds.has(candidate)) {
+    candidate = `${baseId}-${suffix}`;
+    suffix += 1;
+  }
+
+  usedIds.add(candidate);
+  return candidate;
+}
+
+function buildCustomEtfFromDraft(draft, etfId, baseCurrency) {
+  const ticker = normalizeDraftText(draft.ticker).toUpperCase();
+  const name = normalizeDraftText(draft.name);
+  const isin = normalizeDraftText(draft.isin).toUpperCase();
+  const assetClass = normalizeDraftText(draft.assetClass) || "Non specificato";
+
+  if (!ticker) {
+    throw new Error("Inserisci il ticker del nuovo ETF.");
+  }
+
+  if (!name) {
+    throw new Error(`Inserisci il nome completo per ${ticker}.`);
+  }
+
+  const initialPosition = buildInitialPositionFromDraft(draft);
+
+  return {
+    id: etfId,
+    ticker,
+    name,
+    ...(isin ? { isin } : {}),
+    assetClass,
+    currency: baseCurrency,
+    expenseRatio: 0,
+    initialPosition,
+    transactions: [],
+    performanceHistory: [
+      {
+        date: initialPosition.date,
+        close: initialPosition.price,
+        dividend: 0
+      }
+    ]
+  };
+}
+
+function buildPortfolioWithInitialPositions(portfolioData, initialPositionEditorState, customEtfIds) {
+  const draftsByPortfolioId = new Map(
+    initialPositionEditorState
+      .filter((draft) => draft.portfolioEtfId)
+      .map((draft) => [draft.portfolioEtfId, draft])
+  );
+  const customEtfIdSet = new Set(customEtfIds);
+  const nextCustomEtfIds = [];
+  const nextEtfs = portfolioData.etfs.reduce((etfs, etf) => {
+    const draft = draftsByPortfolioId.get(etf.id);
+    const isCustomEtf = customEtfIdSet.has(etf.id);
+
+    if (!draft) {
+      if (!isCustomEtf) {
+        etfs.push(etf);
       }
 
-      if (!draft.date.trim()) {
-        throw new Error(`Inserisci una data iniziale per ${draft.ticker}.`);
+      return etfs;
+    }
+
+    if (isCustomEtf) {
+      if (!draft.enabled) {
+        return etfs;
       }
 
-      const shares = normalizeOptionalNumber(draft.shares, `Le quote iniziali di ${draft.ticker}`);
-      const price = normalizeOptionalNumber(draft.price, `Il prezzo iniziale di ${draft.ticker}`);
+      nextCustomEtfIds.push(etf.id);
+      etfs.push(buildCustomEtfFromDraft(draft, etf.id, portfolioData.portfolio.baseCurrency));
+      return etfs;
+    }
 
-      if (shares == null || shares <= 0) {
-        throw new Error(`Le quote iniziali di ${draft.ticker} devono essere maggiori di zero.`);
-      }
+    if (!draft.enabled) {
+      const { initialPosition, ...etfWithoutInitialPosition } = etf;
+      etfs.push(etfWithoutInitialPosition);
+      return etfs;
+    }
 
-      if (price == null || price <= 0) {
-        throw new Error(`Il prezzo iniziale di ${draft.ticker} deve essere maggiore di zero.`);
-      }
+    etfs.push({
+      ...etf,
+      initialPosition: buildInitialPositionFromDraft(draft)
+    });
 
-      const costBasis = normalizeOptionalNumber(
-        draft.costBasis,
-        `Il costo storico iniziale di ${draft.ticker}`
-      );
-      const fees = normalizeOptionalNumber(draft.fees, `Le fee iniziali di ${draft.ticker}`);
+    return etfs;
+  }, []);
+  const usedIds = new Set(nextEtfs.map((etf) => etf.id));
 
-      if (costBasis != null && costBasis < 0) {
-        throw new Error(`Il costo storico iniziale di ${draft.ticker} non puo essere negativo.`);
-      }
+  for (const draft of initialPositionEditorState.filter(
+    (currentDraft) => currentDraft.isCustom && !currentDraft.portfolioEtfId
+  )) {
+    if (!draft.enabled) {
+      continue;
+    }
 
-      if (fees != null && fees < 0) {
-        throw new Error(`Le fee iniziali di ${draft.ticker} non possono essere negative.`);
-      }
+    const etfId = buildUniqueEtfId(draft, usedIds);
 
-      return {
-        ...etf,
-        initialPosition: {
-          date: draft.date.trim(),
-          shares,
-          price,
-          ...(costBasis != null ? { costBasis } : {}),
-          ...(fees != null ? { fees } : {})
-        }
-      };
-    })
+    nextCustomEtfIds.push(etfId);
+    nextEtfs.push(buildCustomEtfFromDraft(draft, etfId, portfolioData.portfolio.baseCurrency));
+  }
+
+  return {
+    portfolioData: {
+      ...portfolioData,
+      etfs: nextEtfs
+    },
+    customEtfIds: nextCustomEtfIds
   };
 }
 
@@ -206,8 +359,9 @@ function StatCard({ label, value, detail, tone }) {
 export function PortfolioDashboard({ sampleData }) {
   const inputId = useId();
   const [portfolioData, setPortfolioData] = useState(sampleData);
+  const [customEtfIds, setCustomEtfIds] = useState([]);
   const [initialPositionEditorState, setInitialPositionEditorState] = useState(() =>
-    buildInitialPositionEditorState(sampleData)
+    buildInitialPositionEditorState(sampleData, [])
   );
   const [sourceLabel, setSourceLabel] = useState("Dataset di esempio");
   const [feedback, setFeedback] = useState("");
@@ -238,7 +392,8 @@ export function PortfolioDashboard({ sampleData }) {
 
       startTransition(() => {
         setPortfolioData(parsed);
-        setInitialPositionEditorState(buildInitialPositionEditorState(parsed));
+        setCustomEtfIds([]);
+        setInitialPositionEditorState(buildInitialPositionEditorState(parsed, []));
         setSourceLabel(file.name);
         setFeedback(
           `Caricato ${file.name}: ${validated.etfCount} ETF e ${validated.historyPoints} punti storici.`
@@ -256,7 +411,8 @@ export function PortfolioDashboard({ sampleData }) {
   function resetToSample() {
     startTransition(() => {
       setPortfolioData(sampleData);
-      setInitialPositionEditorState(buildInitialPositionEditorState(sampleData));
+      setCustomEtfIds([]);
+      setInitialPositionEditorState(buildInitialPositionEditorState(sampleData, []));
       setSourceLabel("Dataset di esempio");
       setFeedback("Ripristinato il dataset dimostrativo incluso nel progetto.");
       setError("");
@@ -270,7 +426,10 @@ export function PortfolioDashboard({ sampleData }) {
   }
 
   function toggleInitialPositionDraft(etfId, enabled) {
-    const etf = portfolioData.etfs.find((currentEtf) => currentEtf.id === etfId);
+    const currentDraft = initialPositionEditorState.find((draft) => draft.id === etfId);
+    const etf = portfolioData.etfs.find(
+      (currentEtf) => currentEtf.id === currentDraft?.portfolioEtfId
+    );
 
     setInitialPositionEditorState((currentState) =>
       currentState.map((draft) =>
@@ -286,22 +445,41 @@ export function PortfolioDashboard({ sampleData }) {
   }
 
   function resetInitialPositionEditor() {
-    setInitialPositionEditorState(buildInitialPositionEditorState(portfolioData));
+    setInitialPositionEditorState(buildInitialPositionEditorState(portfolioData, customEtfIds));
     setFeedback("Campi del portafoglio iniziale riallineati al dataset corrente.");
+    setError("");
+  }
+
+  function addCustomEtfDraft() {
+    setInitialPositionEditorState((currentState) => [...currentState, createCustomEtfDraft()]);
+    setFeedback("Nuovo ETF aggiunto alla bozza del portafoglio iniziale.");
+    setError("");
+  }
+
+  function removeCustomEtfDraft(etfId) {
+    setInitialPositionEditorState((currentState) =>
+      currentState.filter((draft) => draft.id !== etfId)
+    );
+    setFeedback("ETF rimosso dalla bozza. Applica per aggiornare il dataset.");
     setError("");
   }
 
   function applyInitialPortfolio() {
     try {
-      const nextPortfolioData = buildPortfolioWithInitialPositions(
-        portfolioData,
-        initialPositionEditorState
-      );
+      const { portfolioData: nextPortfolioData, customEtfIds: nextCustomEtfIds } =
+        buildPortfolioWithInitialPositions(
+          portfolioData,
+          initialPositionEditorState,
+          customEtfIds
+        );
       const validated = analyzePortfolio(nextPortfolioData);
 
       startTransition(() => {
         setPortfolioData(nextPortfolioData);
-        setInitialPositionEditorState(buildInitialPositionEditorState(nextPortfolioData));
+        setCustomEtfIds(nextCustomEtfIds);
+        setInitialPositionEditorState(
+          buildInitialPositionEditorState(nextPortfolioData, nextCustomEtfIds)
+        );
         setFeedback(
           `Portafoglio iniziale aggiornato: ${validated.initialPositionCount} ETF con posizione iniziale.`
         );
@@ -469,11 +647,15 @@ export function PortfolioDashboard({ sampleData }) {
                 <h2 className="panel-title">Editor portafoglio iniziale</h2>
                 <p className="panel-copy">
                   Imposta da interfaccia le quote gia possedute a inizio periodo. Le modifiche
-                  restano nel dataset attivo e puoi esportarle di nuovo in JSON.
+                  restano nel dataset attivo, puoi aggiungere nuovi ETF e poi esportare tutto di
+                  nuovo in JSON.
                 </p>
               </div>
 
               <div className="editor-actions">
+                <button className="ghost-button" type="button" onClick={addCustomEtfDraft}>
+                  Aggiungi ETF
+                </button>
                 <button className="ghost-button" type="button" onClick={resetInitialPositionEditor}>
                   Annulla modifiche
                 </button>
@@ -490,7 +672,7 @@ export function PortfolioDashboard({ sampleData }) {
                   {configuredInitialPositions} / {initialPositionEditorState.length}
                 </strong>
                 <span className="editor-overview-copy">
-                  Attiva solo le posizioni gia presenti prima del periodo osservato.
+                  Include sia gli ETF gia presenti sia quelli aggiunti da questo pannello.
                 </span>
               </div>
               <div className="editor-overview-card">
@@ -531,28 +713,96 @@ export function PortfolioDashboard({ sampleData }) {
                       >
                         {draft.enabled ? "Attiva" : "Spenta"}
                       </span>
-                      <span className="editor-ticker-tag">{draft.ticker}</span>
+                      <span className="editor-ticker-tag">{draft.ticker || "Nuovo ETF"}</span>
                     </div>
 
                     <div className="editor-card-head">
                       <div>
-                        <strong className="editor-card-title">{draft.name}</strong>
-                        <p className="editor-card-copy">Configura la posizione di partenza per {draft.ticker}.</p>
+                        <strong className="editor-card-title">
+                          {draft.name || "ETF aggiunto da interfaccia"}
+                        </strong>
+                        <p className="editor-card-copy">
+                          {draft.isCustom
+                            ? "Compila metadati e posizione iniziale. Dopo l'applicazione il JSON avra una cronologia minima compatibile con l'analisi."
+                            : `Configura la posizione di partenza per ${draft.ticker}.`}
+                        </p>
                       </div>
 
-                      <label className={`toggle-line ${draft.enabled ? "toggle-line-on" : ""}`}>
-                        <input
-                          className="toggle-line-input"
-                          type="checkbox"
-                          checked={draft.enabled}
-                          onChange={(event) => toggleInitialPositionDraft(draft.id, event.target.checked)}
-                        />
-                        <span className="toggle-switch" aria-hidden="true">
-                          <span className="toggle-thumb" />
-                        </span>
-                        <span className="toggle-text">Posizione iniziale</span>
-                      </label>
+                      <div className="editor-card-actions">
+                        {draft.isCustom ? (
+                          <button
+                            className="editor-inline-button"
+                            type="button"
+                            onClick={() => removeCustomEtfDraft(draft.id)}
+                          >
+                            Rimuovi
+                          </button>
+                        ) : null}
+
+                        <label className={`toggle-line ${draft.enabled ? "toggle-line-on" : ""}`}>
+                          <input
+                            className="toggle-line-input"
+                            type="checkbox"
+                            checked={draft.enabled}
+                            onChange={(event) =>
+                              toggleInitialPositionDraft(draft.id, event.target.checked)
+                            }
+                          />
+                          <span className="toggle-switch" aria-hidden="true">
+                            <span className="toggle-thumb" />
+                          </span>
+                          <span className="toggle-text">Posizione iniziale</span>
+                        </label>
+                      </div>
                     </div>
+
+                    {draft.isCustom ? (
+                      <div className="editor-fields editor-fields-custom">
+                        <label className="editor-field">
+                          <span>Ticker</span>
+                          <input
+                            type="text"
+                            value={draft.ticker}
+                            onChange={(event) =>
+                              updateInitialPositionDraft(draft.id, "ticker", event.target.value)
+                            }
+                          />
+                        </label>
+
+                        <label className="editor-field">
+                          <span>Nome ETF</span>
+                          <input
+                            type="text"
+                            value={draft.name}
+                            onChange={(event) =>
+                              updateInitialPositionDraft(draft.id, "name", event.target.value)
+                            }
+                          />
+                        </label>
+
+                        <label className="editor-field">
+                          <span>ISIN</span>
+                          <input
+                            type="text"
+                            value={draft.isin}
+                            onChange={(event) =>
+                              updateInitialPositionDraft(draft.id, "isin", event.target.value)
+                            }
+                          />
+                        </label>
+
+                        <label className="editor-field">
+                          <span>Categoria</span>
+                          <input
+                            type="text"
+                            value={draft.assetClass}
+                            onChange={(event) =>
+                              updateInitialPositionDraft(draft.id, "assetClass", event.target.value)
+                            }
+                          />
+                        </label>
+                      </div>
+                    ) : null}
 
                     <div className="editor-preview">
                       <div className="editor-preview-item">
@@ -652,7 +902,9 @@ export function PortfolioDashboard({ sampleData }) {
                     </div>
 
                     <p className="editor-note">
-                      Se lasci vuoto `costo storico`, il sistema usa `quote x prezzo + fee`.
+                      {draft.isCustom
+                        ? "Se lasci vuoto `costo storico`, il sistema usa `quote x prezzo + fee`. Per analisi complete aggiungi poi `transactions` e `performanceHistory` nel JSON esportato."
+                        : "Se lasci vuoto `costo storico`, il sistema usa `quote x prezzo + fee`."}
                     </p>
                   </article>
                 );
@@ -718,6 +970,56 @@ export function PortfolioDashboard({ sampleData }) {
               </div>
             </div>
           </article>
+        </section>
+
+        <section className="content-grid">
+          <article className="panel">
+            <div className="panel-body">
+              <div className="panel-header">
+                <div>
+                  <h2 className="panel-title">Drawdown del portafoglio</h2>
+                  <p className="panel-copy">
+                    Mostra quanto il portafoglio si e allontanato dai suoi massimi nel tempo. E
+                    utile per visualizzare la profondita e la durata delle fasi di stress.
+                  </p>
+                </div>
+              </div>
+
+              <PortfolioDrawdownChart data={analysis.history} />
+            </div>
+          </article>
+
+          <article className="panel">
+            <div className="panel-body">
+              <div className="panel-header">
+                <div>
+                  <h2 className="panel-title">Rischio vs rendimento</h2>
+                  <p className="panel-copy">
+                    Confronta gli ETF per volatilita annua e rendimento annualizzato. Le bolle piu
+                    grandi pesano di piu sul valore attuale del portafoglio.
+                  </p>
+                </div>
+              </div>
+
+              <PortfolioRiskReturnChart etfs={analysis.etfs} />
+            </div>
+          </article>
+        </section>
+
+        <section className="panel">
+          <div className="panel-body">
+            <div className="panel-header">
+              <div>
+                <h2 className="panel-title">Confronto crescita ETF</h2>
+                <p className="panel-copy">
+                  Normalizza l'andamento dei principali ETF e rende immediato vedere quali stanno
+                  guidando la performance e quali stanno restando indietro.
+                </p>
+              </div>
+            </div>
+
+            <PortfolioEtfComparisonChart etfs={analysis.etfs} />
+          </div>
         </section>
 
         <section className="content-grid">
@@ -924,7 +1226,8 @@ export function PortfolioDashboard({ sampleData }) {
                 <p className="panel-copy">
                   Per statistiche affidabili conviene memorizzare portafoglio iniziale, flussi di
                   acquisto/vendita e serie storica dei prezzi. Il campo `dividend` e opzionale ma
-                  utile per ETF a distribuzione.
+                  utile per ETF a distribuzione. Gli ETF aggiunti dall'editor partono invece con
+                  una cronologia minima, da arricchire poi nel JSON.
                 </p>
               </div>
             </div>
@@ -939,6 +1242,7 @@ export function PortfolioDashboard({ sampleData }) {
                   <li>`dividend` permette di includere cash flow distribuiti dagli ETF.</li>
                   <li>`costBasis` nell'initialPosition conserva il costo storico delle quote.</li>
                   <li>`fees` evita di sovrastimare i rendimenti netti.</li>
+                  <li>L'editor puo aggiungere nuovi ETF, ma conviene completare poi lo storico.</li>
                 </ol>
               </div>
 
