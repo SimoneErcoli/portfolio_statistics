@@ -1,5 +1,7 @@
 import { loadSamplePortfolio } from "../../../lib/sample-portfolio";
 
+export const dynamic = "force-static";
+
 export async function GET() {
   const sampleData = await loadSamplePortfolio();
 
