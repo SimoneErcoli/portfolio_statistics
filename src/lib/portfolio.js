@@ -129,9 +129,48 @@ function validatePortfolio(portfolioData) {
     throw new Error("`portfolio.baseCurrency` e obbligatorio.");
   }
 
-  if (!Array.isArray(portfolioData.etfs) || portfolioData.etfs.length === 0) {
-    throw new Error("Il portafoglio deve contenere almeno un ETF in `etfs`.");
+  if (!Array.isArray(portfolioData.etfs)) {
+    throw new Error("Il portafoglio deve contenere un array `etfs`.");
   }
+}
+
+function buildEmptyAnalysis(portfolioData) {
+  const baseCurrency = portfolioData.portfolio.baseCurrency;
+
+  return {
+    name: portfolioData.portfolio.name,
+    baseCurrency,
+    notes: portfolioData.portfolio.notes ?? "",
+    currentValue: 0,
+    wealth: 0,
+    totalContributed: 0,
+    returnedCapital: 0,
+    dividendsReceived: 0,
+    feesPaid: 0,
+    costBasis: 0,
+    totalProfit: 0,
+    totalReturn: 0,
+    timeWeightedReturn: 0,
+    annualizedReturn: 0,
+    volatility: 0,
+    maxDrawdown: 0,
+    firstDate: null,
+    lastDate: null,
+    activePositions: 0,
+    etfCount: 0,
+    historyPoints: 0,
+    initialPositionCount: 0,
+    initialPortfolioMarketValue: 0,
+    initialPortfolioCostBasis: 0,
+    initialPortfolioDate: null,
+    allocation: [],
+    history: [],
+    etfs: [],
+    bestPerformer: null,
+    worstPerformer: null,
+    topProfitContributor: null,
+    mostVolatile: null
+  };
 }
 
 function parseInitialPosition(etf) {
@@ -434,6 +473,10 @@ function analyzeEftSeries(etf, baseCurrency) {
 
 export function analyzePortfolio(portfolioData) {
   validatePortfolio(portfolioData);
+
+  if (portfolioData.etfs.length === 0) {
+    return buildEmptyAnalysis(portfolioData);
+  }
 
   const baseCurrency = portfolioData.portfolio.baseCurrency;
   const etfs = portfolioData.etfs

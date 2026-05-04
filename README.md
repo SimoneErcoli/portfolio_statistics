@@ -17,6 +17,12 @@ npm run dev
 
 Apri `http://localhost:3000`.
 
+All'avvio l'app parte da un portafoglio vuoto con `0` ETF, cosi l'utente puo costruirlo da interfaccia. Il dataset di esempio resta scaricabile da `/api/sample-portfolio`.
+
+Da interfaccia puoi:
+- aggiungere ETF al portafoglio iniziale
+- aggiungere transazioni `buy` e `sell` agli ETF gia presenti nel dataset attivo
+
 ## Struttura del JSON
 
 Ogni ETF deve contenere almeno:

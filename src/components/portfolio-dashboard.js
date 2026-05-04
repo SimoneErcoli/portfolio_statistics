@@ -85,6 +85,17 @@ function buildInitialPositionEditorState(portfolioData, customEtfIds = []) {
   }));
 }
 
+function createEmptyPortfolioData(templateData) {
+  return {
+    portfolio: {
+      name: "Nuovo portafoglio ETF",
+      baseCurrency: templateData?.portfolio?.baseCurrency ?? "EUR",
+      notes: ""
+    },
+    etfs: []
+  };
+}
+
 function normalizeOptionalNumber(value, label) {
   if (value.trim() === "") {
     return null;
@@ -109,6 +120,28 @@ function getDraftLabel(draft) {
 
 function createLocalDraftId() {
   return `draft-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createTransactionDraft(transaction = {}) {
+  return {
+    id: createLocalDraftId(),
+    date: transaction.date ?? "",
+    type: transaction.type ?? "buy",
+    shares: transaction.shares != null ? String(transaction.shares) : "",
+    price: transaction.price != null ? String(transaction.price) : "",
+    fees: transaction.fees != null ? String(transaction.fees) : ""
+  };
+}
+
+function buildTransactionEditorState(portfolioData) {
+  return portfolioData.etfs.map((etf) => ({
+    id: etf.id,
+    ticker: etf.ticker,
+    name: etf.name,
+    transactions: Array.isArray(etf.transactions)
+      ? etf.transactions.map((transaction) => createTransactionDraft(transaction))
+      : []
+  }));
 }
 
 function createCustomEtfDraft() {
@@ -193,7 +226,56 @@ function buildUniqueEtfId(draft, usedIds) {
   return candidate;
 }
 
-function buildCustomEtfFromDraft(draft, etfId, baseCurrency) {
+function buildTransactionFromDraft(transactionDraft, draftLabel, index) {
+  const transactionLabel = `La transazione ${index + 1} di ${draftLabel}`;
+  const date = normalizeDraftText(transactionDraft.date);
+
+  if (!date) {
+    throw new Error(`${transactionLabel} deve avere una data.`);
+  }
+
+  const type = transactionDraft.type;
+
+  if (!["buy", "sell"].includes(type)) {
+    throw new Error(`${transactionLabel} deve essere buy o sell.`);
+  }
+
+  const shares = normalizeOptionalNumber(transactionDraft.shares, `Le quote di ${transactionLabel}`);
+  const price = normalizeOptionalNumber(transactionDraft.price, `Il prezzo di ${transactionLabel}`);
+  const fees = normalizeOptionalNumber(transactionDraft.fees, `Le fee di ${transactionLabel}`);
+
+  if (shares == null || shares <= 0) {
+    throw new Error(`Le quote di ${transactionLabel} devono essere maggiori di zero.`);
+  }
+
+  if (price == null || price <= 0) {
+    throw new Error(`Il prezzo di ${transactionLabel} deve essere maggiore di zero.`);
+  }
+
+  if (fees != null && fees < 0) {
+    throw new Error(`Le fee di ${transactionLabel} non possono essere negative.`);
+  }
+
+  return {
+    date,
+    type,
+    shares,
+    price,
+    ...(fees != null ? { fees } : {})
+  };
+}
+
+function buildTransactionsFromDrafts(transactionEditorDraft) {
+  const draftLabel = normalizeDraftText(transactionEditorDraft.ticker) || transactionEditorDraft.name;
+
+  return transactionEditorDraft.transactions
+    .map((transactionDraft, index) =>
+      buildTransactionFromDraft(transactionDraft, draftLabel, index)
+    )
+    .sort((left, right) => left.date.localeCompare(right.date));
+}
+
+function buildCustomEtfFromDraft(draft, etfId, baseCurrency, existingEtf = null) {
   const ticker = normalizeDraftText(draft.ticker).toUpperCase();
   const name = normalizeDraftText(draft.name);
   const isin = normalizeDraftText(draft.isin).toUpperCase();
@@ -215,17 +297,20 @@ function buildCustomEtfFromDraft(draft, etfId, baseCurrency) {
     name,
     ...(isin ? { isin } : {}),
     assetClass,
-    currency: baseCurrency,
-    expenseRatio: 0,
+    currency: existingEtf?.currency ?? baseCurrency,
+    expenseRatio: existingEtf?.expenseRatio ?? 0,
     initialPosition,
-    transactions: [],
-    performanceHistory: [
-      {
-        date: initialPosition.date,
-        close: initialPosition.price,
-        dividend: 0
-      }
-    ]
+    transactions: Array.isArray(existingEtf?.transactions) ? existingEtf.transactions : [],
+    performanceHistory:
+      Array.isArray(existingEtf?.performanceHistory) && existingEtf.performanceHistory.length > 0
+        ? existingEtf.performanceHistory
+        : [
+            {
+              date: initialPosition.date,
+              close: initialPosition.price,
+              dividend: 0
+            }
+          ]
   };
 }
 
@@ -255,7 +340,7 @@ function buildPortfolioWithInitialPositions(portfolioData, initialPositionEditor
       }
 
       nextCustomEtfIds.push(etf.id);
-      etfs.push(buildCustomEtfFromDraft(draft, etf.id, portfolioData.portfolio.baseCurrency));
+      etfs.push(buildCustomEtfFromDraft(draft, etf.id, portfolioData.portfolio.baseCurrency, etf));
       return etfs;
     }
 
@@ -293,6 +378,26 @@ function buildPortfolioWithInitialPositions(portfolioData, initialPositionEditor
       etfs: nextEtfs
     },
     customEtfIds: nextCustomEtfIds
+  };
+}
+
+function buildPortfolioWithTransactions(portfolioData, transactionEditorState) {
+  const transactionDraftsByEtfId = new Map(transactionEditorState.map((draft) => [draft.id, draft]));
+
+  return {
+    ...portfolioData,
+    etfs: portfolioData.etfs.map((etf) => {
+      const transactionDraft = transactionDraftsByEtfId.get(etf.id);
+
+      if (!transactionDraft) {
+        return etf;
+      }
+
+      return {
+        ...etf,
+        transactions: buildTransactionsFromDrafts(transactionDraft)
+      };
+    })
   };
 }
 
@@ -358,12 +463,16 @@ function StatCard({ label, value, detail, tone }) {
 
 export function PortfolioDashboard({ sampleData }) {
   const inputId = useId();
-  const [portfolioData, setPortfolioData] = useState(sampleData);
+  const emptyPortfolioData = createEmptyPortfolioData(sampleData);
+  const [portfolioData, setPortfolioData] = useState(() => emptyPortfolioData);
   const [customEtfIds, setCustomEtfIds] = useState([]);
   const [initialPositionEditorState, setInitialPositionEditorState] = useState(() =>
-    buildInitialPositionEditorState(sampleData, [])
+    buildInitialPositionEditorState(emptyPortfolioData, [])
   );
-  const [sourceLabel, setSourceLabel] = useState("Dataset di esempio");
+  const [transactionEditorState, setTransactionEditorState] = useState(() =>
+    buildTransactionEditorState(emptyPortfolioData)
+  );
+  const [sourceLabel, setSourceLabel] = useState("Nuovo portafoglio vuoto");
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
   const [isPending, startTransition] = useTransition();
@@ -394,6 +503,7 @@ export function PortfolioDashboard({ sampleData }) {
         setPortfolioData(parsed);
         setCustomEtfIds([]);
         setInitialPositionEditorState(buildInitialPositionEditorState(parsed, []));
+        setTransactionEditorState(buildTransactionEditorState(parsed));
         setSourceLabel(file.name);
         setFeedback(
           `Caricato ${file.name}: ${validated.etfCount} ETF e ${validated.historyPoints} punti storici.`
@@ -408,13 +518,14 @@ export function PortfolioDashboard({ sampleData }) {
     event.target.value = "";
   }
 
-  function resetToSample() {
+  function resetToEmptyPortfolio() {
     startTransition(() => {
-      setPortfolioData(sampleData);
+      setPortfolioData(emptyPortfolioData);
       setCustomEtfIds([]);
-      setInitialPositionEditorState(buildInitialPositionEditorState(sampleData, []));
-      setSourceLabel("Dataset di esempio");
-      setFeedback("Ripristinato il dataset dimostrativo incluso nel progetto.");
+      setInitialPositionEditorState(buildInitialPositionEditorState(emptyPortfolioData, []));
+      setTransactionEditorState(buildTransactionEditorState(emptyPortfolioData));
+      setSourceLabel("Nuovo portafoglio vuoto");
+      setFeedback("Ripartito da un portafoglio vuoto con 0 ETF.");
       setError("");
     });
   }
@@ -435,10 +546,10 @@ export function PortfolioDashboard({ sampleData }) {
       currentState.map((draft) =>
         draft.id === etfId
           ? {
-              ...draft,
-              enabled,
-              date: enabled && !draft.date ? getSuggestedInitialDate(etf ?? {}) : draft.date
-            }
+            ...draft,
+            enabled,
+            date: enabled && !draft.date ? getSuggestedInitialDate(etf ?? {}) : draft.date
+          }
           : draft
       )
     );
@@ -447,6 +558,58 @@ export function PortfolioDashboard({ sampleData }) {
   function resetInitialPositionEditor() {
     setInitialPositionEditorState(buildInitialPositionEditorState(portfolioData, customEtfIds));
     setFeedback("Campi del portafoglio iniziale riallineati al dataset corrente.");
+    setError("");
+  }
+
+  function updateTransactionDraft(etfId, transactionId, field, value) {
+    setTransactionEditorState((currentState) =>
+      currentState.map((draft) =>
+        draft.id === etfId
+          ? {
+              ...draft,
+              transactions: draft.transactions.map((transactionDraft) =>
+                transactionDraft.id === transactionId
+                  ? { ...transactionDraft, [field]: value }
+                  : transactionDraft
+              )
+            }
+          : draft
+      )
+    );
+  }
+
+  function addTransactionDraft(etfId) {
+    setTransactionEditorState((currentState) =>
+      currentState.map((draft) =>
+        draft.id === etfId
+          ? { ...draft, transactions: [...draft.transactions, createTransactionDraft()] }
+          : draft
+      )
+    );
+    setFeedback("Nuova transazione aggiunta alla bozza.");
+    setError("");
+  }
+
+  function removeTransactionDraft(etfId, transactionId) {
+    setTransactionEditorState((currentState) =>
+      currentState.map((draft) =>
+        draft.id === etfId
+          ? {
+              ...draft,
+              transactions: draft.transactions.filter(
+                (transactionDraft) => transactionDraft.id !== transactionId
+              )
+            }
+          : draft
+      )
+    );
+    setFeedback("Transazione rimossa dalla bozza.");
+    setError("");
+  }
+
+  function resetTransactionEditor() {
+    setTransactionEditorState(buildTransactionEditorState(portfolioData));
+    setFeedback("Transazioni riallineate al dataset corrente.");
     setError("");
   }
 
@@ -480,6 +643,7 @@ export function PortfolioDashboard({ sampleData }) {
         setInitialPositionEditorState(
           buildInitialPositionEditorState(nextPortfolioData, nextCustomEtfIds)
         );
+        setTransactionEditorState(buildTransactionEditorState(nextPortfolioData));
         setFeedback(
           `Portafoglio iniziale aggiornato: ${validated.initialPositionCount} ETF con posizione iniziale.`
         );
@@ -495,6 +659,33 @@ export function PortfolioDashboard({ sampleData }) {
     }
   }
 
+  function applyTransactions() {
+    try {
+      const nextPortfolioData = buildPortfolioWithTransactions(portfolioData, transactionEditorState);
+      const validated = analyzePortfolio(nextPortfolioData);
+      const transactionCount = nextPortfolioData.etfs.reduce(
+        (total, etf) => total + (Array.isArray(etf.transactions) ? etf.transactions.length : 0),
+        0
+      );
+
+      startTransition(() => {
+        setPortfolioData(nextPortfolioData);
+        setTransactionEditorState(buildTransactionEditorState(nextPortfolioData));
+        setFeedback(
+          `Transazioni aggiornate: ${transactionCount} operazioni distribuite su ${validated.etfCount} ETF.`
+        );
+        setError("");
+      });
+    } catch (caughtError) {
+      setError(
+        caughtError instanceof Error
+          ? caughtError.message
+          : "Impossibile aggiornare le transazioni."
+      );
+      setFeedback("");
+    }
+  }
+
   function exportCurrentPortfolio() {
     const baseName =
       sourceLabel.toLowerCase().endsWith(".json")
@@ -502,7 +693,7 @@ export function PortfolioDashboard({ sampleData }) {
         : sourceLabel.replace(/\s+/g, "-").toLowerCase();
 
     downloadJsonFile(`${baseName || "portfolio"}-edited.json`, portfolioData);
-    setFeedback("JSON corrente esportato con le posizioni iniziali impostate da interfaccia.");
+    setFeedback("JSON corrente esportato con tutte le modifiche fatte da interfaccia.");
     setError("");
   }
 
@@ -511,7 +702,7 @@ export function PortfolioDashboard({ sampleData }) {
       <main className="page-shell">
         <section className="hero">
           <p className="eyebrow">ETF Portfolio Observatory</p>
-          <h1>Statistiche chiare dal tuo JSON</h1>
+          <h1>Statistiche chiare per il tuo portafoglio di investimenti</h1>
           <p className="hero-copy">
             Carica uno storico con transazioni e prezzi degli ETF. La dashboard ricostruisce il
             portafoglio, misura rendimento, drawdown e contributo di ogni posizione.
@@ -538,9 +729,9 @@ export function PortfolioDashboard({ sampleData }) {
       detail:
         analysis.initialPositionCount > 0
           ? `${analysis.initialPositionCount} ETF iniziali · costo ${formatCurrency(
-              analysis.initialPortfolioCostBasis,
-              analysis.baseCurrency
-            )}`
+            analysis.initialPortfolioCostBasis,
+            analysis.baseCurrency
+          )}`
           : "Nessuna posizione iniziale definita"
     },
     {
@@ -586,16 +777,24 @@ export function PortfolioDashboard({ sampleData }) {
   const incompleteInitialDrafts = initialPositionEditorState.filter(
     (draft) => draft.enabled && (!draft.date || estimateDraftValue(draft) == null)
   ).length;
+  const totalTransactionDrafts = transactionEditorState.reduce(
+    (total, draft) => total + draft.transactions.length,
+    0
+  );
+  const etfsWithTransactionDrafts = transactionEditorState.filter(
+    (draft) => draft.transactions.length > 0
+  ).length;
+  const hasTrackedEtfs = analysis.etfCount > 0;
 
   return (
     <main className="page-shell">
       <section className="hero">
         <p className="eyebrow">ETF Portfolio Observatory</p>
-        <h1>Statistiche chiare dal tuo JSON</h1>
+        <h1>Statistiche chiare per il tuo portafoglio di investimenti</h1>
         <p className="hero-copy">
-          Carica un file JSON che tenga traccia di portafoglio iniziale, transazioni, prezzi di
-          chiusura e dividendi degli ETF. La dashboard ricostruisce la cronologia del portafoglio
-          e produce metriche piu affidabili rispetto a un semplice snapshot finale.
+          Parti da un portafoglio vuoto oppure carica un file JSON. La dashboard ricostruisce la
+          cronologia del portafoglio e produce metriche piu affidabili rispetto a un semplice
+          snapshot finale.
         </p>
       </section>
 
@@ -611,8 +810,8 @@ export function PortfolioDashboard({ sampleData }) {
                 onChange={handleFileChange}
               />
             </label>
-            <button className="ghost-button" type="button" onClick={resetToSample}>
-              Ripristina esempio
+            <button className="ghost-button" type="button" onClick={resetToEmptyPortfolio}>
+              Nuovo portafoglio
             </button>
             <a className="primary-link" href="/api/sample-portfolio">
               Scarica esempio
@@ -696,6 +895,16 @@ export function PortfolioDashboard({ sampleData }) {
             </div>
 
             <div className="initial-editor-grid">
+              {initialPositionEditorState.length === 0 ? (
+                <article className="editor-empty-state">
+                  <strong className="editor-card-title">Portafoglio iniziale vuoto</strong>
+                  <p className="editor-card-copy">
+                    Parti da 0 ETF. Usa `Aggiungi ETF`, compila i campi e poi premi `Applica
+                    portafoglio iniziale`.
+                  </p>
+                </article>
+              ) : null}
+
               {initialPositionEditorState.map((draft) => {
                 const estimatedValue = estimateDraftValue(draft);
                 const estimatedCostBasis = estimateDraftCostBasis(draft);
@@ -707,9 +916,8 @@ export function PortfolioDashboard({ sampleData }) {
                   >
                     <div className="editor-card-topline">
                       <span
-                        className={`editor-status-badge ${
-                          draft.enabled ? "editor-status-badge-active" : "editor-status-badge-muted"
-                        }`}
+                        className={`editor-status-badge ${draft.enabled ? "editor-status-badge-active" : "editor-status-badge-muted"
+                          }`}
                       >
                         {draft.enabled ? "Attiva" : "Spenta"}
                       </span>
@@ -913,310 +1121,590 @@ export function PortfolioDashboard({ sampleData }) {
           </div>
         </section>
 
-        <section className="content-grid">
-          <article className="panel">
-            <div className="panel-body">
-              <div className="panel-header">
-                <div>
-                  <h2 className="panel-title">Traiettoria del portafoglio</h2>
-                  <p className="panel-copy">
-                    Confronto fra ricchezza cumulata e contributi netti. La linea piena somma
-                    valore attuale, vendite e dividendi incassati.
-                  </p>
-                </div>
-
-                <div className="legend">
-                  <span className="legend-chip">
-                    <span className="legend-dot" style={{ background: "var(--text)" }} />
-                    Ricchezza
-                  </span>
-                  <span className="legend-chip">
-                    <span className="legend-dot" style={{ background: "var(--accent)" }} />
-                    Contributi netti
-                  </span>
-                </div>
-              </div>
-
-              <PerformanceChart data={analysis.history} currency={analysis.baseCurrency} />
-            </div>
-          </article>
-
-          <article className="panel">
-            <div className="panel-body">
-              <div className="panel-header">
-                <div>
-                  <h2 className="panel-title">Allocazione corrente</h2>
-                  <p className="panel-copy">
-                    Peso attuale delle posizioni aperte sul valore complessivo del portafoglio.
-                  </p>
-                </div>
-              </div>
-
-              <div className="allocation-list">
-                {analysis.allocation.map((item) => (
-                  <div className="allocation-row" key={item.id}>
-                    <div className="allocation-head">
-                      <strong>{item.ticker}</strong>
-                      <span>{formatPercent(item.weight)}</span>
-                    </div>
-                    <div className="allocation-track" aria-hidden="true">
-                      <div className="allocation-fill" style={{ width: `${item.weight * 100}%` }} />
-                    </div>
-                    <span className="allocation-name">
-                      {item.name} · {formatCurrency(item.currentValue, analysis.baseCurrency)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </article>
-        </section>
-
-        <section className="content-grid">
-          <article className="panel">
-            <div className="panel-body">
-              <div className="panel-header">
-                <div>
-                  <h2 className="panel-title">Drawdown del portafoglio</h2>
-                  <p className="panel-copy">
-                    Mostra quanto il portafoglio si e allontanato dai suoi massimi nel tempo. E
-                    utile per visualizzare la profondita e la durata delle fasi di stress.
-                  </p>
-                </div>
-              </div>
-
-              <PortfolioDrawdownChart data={analysis.history} />
-            </div>
-          </article>
-
-          <article className="panel">
-            <div className="panel-body">
-              <div className="panel-header">
-                <div>
-                  <h2 className="panel-title">Rischio vs rendimento</h2>
-                  <p className="panel-copy">
-                    Confronta gli ETF per volatilita annua e rendimento annualizzato. Le bolle piu
-                    grandi pesano di piu sul valore attuale del portafoglio.
-                  </p>
-                </div>
-              </div>
-
-              <PortfolioRiskReturnChart etfs={analysis.etfs} />
-            </div>
-          </article>
-        </section>
-
         <section className="panel">
           <div className="panel-body">
             <div className="panel-header">
               <div>
-                <h2 className="panel-title">Confronto crescita ETF</h2>
+                <h2 className="panel-title">Editor transazioni</h2>
                 <p className="panel-copy">
-                  Normalizza l'andamento dei principali ETF e rende immediato vedere quali stanno
-                  guidando la performance e quali stanno restando indietro.
+                  Aggiungi acquisti e vendite direttamente da interfaccia. Gli ETF appena creati in
+                  bozza compariranno qui dopo l'applicazione del portafoglio iniziale.
                 </p>
               </div>
+
+              <div className="editor-actions">
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={resetTransactionEditor}
+                  disabled={portfolioData.etfs.length === 0}
+                >
+                  Annulla transazioni
+                </button>
+                <button
+                  className="upload-label"
+                  type="button"
+                  onClick={applyTransactions}
+                  disabled={portfolioData.etfs.length === 0}
+                >
+                  Applica transazioni
+                </button>
+              </div>
             </div>
 
-            <PortfolioEtfComparisonChart etfs={analysis.etfs} />
-          </div>
-        </section>
+            <div className="editor-overview">
+              <div className="editor-overview-card">
+                <span className="editor-overview-label">Operazioni in bozza</span>
+                <strong className="editor-overview-value">{totalTransactionDrafts}</strong>
+                <span className="editor-overview-copy">
+                  Somma di acquisti e vendite non ancora applicati al dataset.
+                </span>
+              </div>
+              <div className="editor-overview-card">
+                <span className="editor-overview-label">ETF con movimenti</span>
+                <strong className="editor-overview-value">
+                  {etfsWithTransactionDrafts} / {transactionEditorState.length}
+                </strong>
+                <span className="editor-overview-copy">
+                  Ti aiuta a capire dove hai gia registrato operazioni.
+                </span>
+              </div>
+              <div className="editor-overview-card">
+                <span className="editor-overview-label">Stato transazioni</span>
+                <strong className="editor-overview-value">
+                  {portfolioData.etfs.length === 0
+                    ? "Nessun ETF"
+                    : totalTransactionDrafts === 0
+                      ? "Vuoto"
+                      : "Pronte"}
+                </strong>
+                <span className="editor-overview-copy">
+                  Se non vedi ETF qui, applica prima il portafoglio iniziale.
+                </span>
+              </div>
+            </div>
 
-        <section className="content-grid">
-          <article className="panel">
-            <div className="panel-body">
-              <div className="panel-header">
-                <div>
-                  <h2 className="panel-title">Indicatori rapidi</h2>
-                  <p className="panel-copy">
-                    Un riepilogo delle posizioni che stanno guidando rischio e rendimento.
+            {portfolioData.etfs.length === 0 ? (
+              <div className="transaction-editor-grid">
+                <article className="editor-empty-state">
+                  <strong className="editor-card-title">Nessun ETF disponibile</strong>
+                  <p className="editor-card-copy">
+                    Per registrare transazioni devi prima aggiungere almeno un ETF nel portafoglio
+                    iniziale e premere `Applica portafoglio iniziale`.
                   </p>
-                </div>
+                </article>
               </div>
+            ) : (
+              <div className="transaction-editor-grid">
+                {transactionEditorState.map((etfDraft) => {
+                  const buyCount = etfDraft.transactions.filter(
+                    (transactionDraft) => transactionDraft.type === "buy"
+                  ).length;
+                  const sellCount = etfDraft.transactions.filter(
+                    (transactionDraft) => transactionDraft.type === "sell"
+                  ).length;
 
-              <div className="insight-list">
-                <div className="insight-row">
-                  <span className="insight-label">ETF migliore per TWR</span>
-                  <strong>
-                    {analysis.bestPerformer.ticker} · {formatPercent(analysis.bestPerformer.timeWeightedReturn)}
-                  </strong>
-                </div>
-                <div className="insight-row">
-                  <span className="insight-label">ETF peggiore per TWR</span>
-                  <strong>
-                    {analysis.worstPerformer.ticker} · {formatPercent(analysis.worstPerformer.timeWeightedReturn)}
-                  </strong>
-                </div>
-                <div className="insight-row">
-                  <span className="insight-label">Maggiore contributo al profitto</span>
-                  <strong>
-                    {analysis.topProfitContributor.ticker} ·{" "}
-                    {formatCurrency(analysis.topProfitContributor.totalProfit, analysis.baseCurrency)}
-                  </strong>
-                </div>
-                <div className="insight-row">
-                  <span className="insight-label">ETF piu volatile</span>
-                  <strong>
-                    {analysis.mostVolatile.ticker} · {formatPercent(analysis.mostVolatile.volatility)}
-                  </strong>
-                </div>
-              </div>
-            </div>
-          </article>
-
-          <article className="panel">
-            <div className="panel-body">
-              <div className="panel-header">
-                <div>
-                  <h2 className="panel-title">Metadati del dataset</h2>
-                  <p className="panel-copy">
-                    Informazioni utili per capire copertura temporale e densita del JSON caricato.
-                  </p>
-                </div>
-              </div>
-
-              <div className="meta-list">
-                <div className="meta-row">
-                  <span className="meta-label">Portafoglio</span>
-                  <strong>{analysis.name}</strong>
-                </div>
-                <div className="meta-row">
-                  <span className="meta-label">Valuta base</span>
-                  <strong>{analysis.baseCurrency}</strong>
-                </div>
-                <div className="meta-row">
-                  <span className="meta-label">Finestra storica</span>
-                  <strong>
-                    {formatDateLabel(analysis.firstDate)} - {formatDateLabel(analysis.lastDate)}
-                  </strong>
-                </div>
-                <div className="meta-row">
-                  <span className="meta-label">ETF tracciati</span>
-                  <strong>{analysis.etfCount}</strong>
-                </div>
-                <div className="meta-row">
-                  <span className="meta-label">Portafoglio iniziale</span>
-                  <strong>
-                    {formatCurrency(analysis.initialPortfolioMarketValue, analysis.baseCurrency)}
-                  </strong>
-                </div>
-                {analysis.initialPortfolioDate ? (
-                  <div className="meta-row">
-                    <span className="meta-label">Data iniziale</span>
-                    <strong>{formatDateLabel(analysis.initialPortfolioDate)}</strong>
-                  </div>
-                ) : null}
-                <div className="meta-row">
-                  <span className="meta-label">Punti storici totali</span>
-                  <strong>{formatNumber(analysis.historyPoints)}</strong>
-                </div>
-                <div className="meta-row">
-                  <span className="meta-label">Contributi lordi</span>
-                  <strong>{formatCurrency(analysis.totalContributed, analysis.baseCurrency)}</strong>
-                </div>
-                {analysis.notes ? (
-                  <div className="meta-row">
-                    <span className="meta-label">Note</span>
-                    <strong>{analysis.notes}</strong>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          </article>
-        </section>
-
-        <section className="panel">
-          <div className="panel-body">
-            <div className="panel-header">
-              <div>
-                <h2 className="panel-title">Analisi ETF</h2>
-                <p className="panel-copy">
-                  Per ogni strumento sono mostrati valore, rendimento, rischio e impatto sul
-                  portafoglio attuale.
-                </p>
-              </div>
-            </div>
-
-            <div className="table-wrap">
-              <table className="portfolio-table">
-                <thead>
-                  <tr>
-                    <th>Strumento</th>
-                    <th>Quote</th>
-                    <th>Valore attuale</th>
-                    <th>Profitto totale</th>
-                    <th>TWR</th>
-                    <th>Totale %</th>
-                    <th>Volatilita</th>
-                    <th>Drawdown</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {analysis.etfs.map((etf) => (
-                    <tr key={etf.id}>
-                      <td>
-                        <strong>{etf.ticker}</strong>
-                        <span className="instrument-meta">{etf.name}</span>
-                        <span className="instrument-meta">
-                          {etf.isin ? `${etf.isin} · ` : ""}
-                          {etf.assetClass}
+                  return (
+                    <article
+                      className={`editor-card ${
+                        etfDraft.transactions.length > 0 ? "editor-card-active" : "editor-card-muted"
+                      }`}
+                      key={etfDraft.id}
+                    >
+                      <div className="editor-card-topline">
+                        <span
+                          className={`editor-status-badge ${
+                            etfDraft.transactions.length > 0
+                              ? "editor-status-badge-active"
+                              : "editor-status-badge-muted"
+                          }`}
+                        >
+                          {etfDraft.transactions.length > 0 ? "Con movimenti" : "Senza movimenti"}
                         </span>
-                        {etf.initialPosition ? (
-                          <span className="instrument-meta">
-                            Iniziale {formatNumber(etf.initialPosition.shares)} quote da{" "}
-                            {formatDateLabel(etf.initialPosition.date)}
-                          </span>
+                        <span className="editor-ticker-tag">{etfDraft.ticker}</span>
+                      </div>
+
+                      <div className="editor-card-head">
+                        <div>
+                          <strong className="editor-card-title">{etfDraft.name}</strong>
+                          <p className="editor-card-copy">
+                            Registra acquisti e vendite. Le modifiche restano in bozza finche non
+                            premi `Applica transazioni`.
+                          </p>
+                        </div>
+
+                        <div className="editor-card-actions">
+                          <button
+                            className="editor-inline-button"
+                            type="button"
+                            onClick={() => addTransactionDraft(etfDraft.id)}
+                          >
+                            Aggiungi transazione
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="editor-preview">
+                        <div className="editor-preview-item">
+                          <span className="editor-preview-label">Operazioni</span>
+                          <strong className="editor-preview-value">
+                            {etfDraft.transactions.length}
+                          </strong>
+                        </div>
+                        <div className="editor-preview-item">
+                          <span className="editor-preview-label">Acquisti</span>
+                          <strong className="editor-preview-value">{buyCount}</strong>
+                        </div>
+                        <div className="editor-preview-item">
+                          <span className="editor-preview-label">Vendite</span>
+                          <strong className="editor-preview-value">{sellCount}</strong>
+                        </div>
+                      </div>
+
+                      <div className="transaction-list">
+                        {etfDraft.transactions.length === 0 ? (
+                          <div className="transaction-empty-state">
+                            Nessuna transazione in bozza per {etfDraft.ticker}.
+                          </div>
                         ) : null}
-                      </td>
-                      <td>
-                        <strong>{formatNumber(etf.shares)}</strong>
-                        <span className="instrument-meta">
-                          Prezzo {formatCurrency(etf.currentPrice, analysis.baseCurrency)}
-                        </span>
-                      </td>
-                      <td>
-                        <strong>{formatCurrency(etf.currentValue, analysis.baseCurrency)}</strong>
-                        <span className="instrument-meta">
-                          <span className="pill">{formatPercent(etf.weight)}</span>
-                        </span>
-                      </td>
-                      <td className={toneClass(etf.totalProfit)}>
-                        <strong>{formatCurrency(etf.totalProfit, analysis.baseCurrency)}</strong>
-                        <span className="instrument-meta">
-                          Realizzato {formatCurrency(etf.realizedPnL, analysis.baseCurrency)}
-                        </span>
-                      </td>
-                      <td className={toneClass(etf.timeWeightedReturn)}>
-                        <strong>{formatPercent(etf.timeWeightedReturn)}</strong>
-                        <span className="instrument-meta">
-                          Annuo {formatPercent(etf.annualizedReturn)}
-                        </span>
-                      </td>
-                      <td className={toneClass(etf.totalReturn)}>
-                        <strong>{formatPercent(etf.totalReturn)}</strong>
-                        <span className="instrument-meta">
-                          Dividendi {formatCurrency(etf.dividendsReceived, analysis.baseCurrency)}
-                        </span>
-                      </td>
-                      <td>
-                        <strong>{formatPercent(etf.volatility)}</strong>
-                        <span className="instrument-meta">
-                          Fee {formatCurrency(etf.feesPaid, analysis.baseCurrency)}
-                        </span>
-                      </td>
-                      <td className={toneClass(-etf.maxDrawdown)}>
-                        <strong>{formatPercent(-etf.maxDrawdown)}</strong>
-                        <span className="instrument-meta">
-                          Costo residuo {formatCurrency(etf.costBasis, analysis.baseCurrency)}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+
+                        {etfDraft.transactions.map((transactionDraft, index) => (
+                          <div className="transaction-row" key={transactionDraft.id}>
+                            <div className="transaction-row-head">
+                              <strong>Operazione {index + 1}</strong>
+                              <button
+                                className="editor-inline-button"
+                                type="button"
+                                onClick={() =>
+                                  removeTransactionDraft(etfDraft.id, transactionDraft.id)
+                                }
+                              >
+                                Rimuovi
+                              </button>
+                            </div>
+
+                            <div className="editor-fields transaction-fields">
+                              <label className="editor-field">
+                                <span>Data</span>
+                                <input
+                                  type="date"
+                                  value={transactionDraft.date}
+                                  onChange={(event) =>
+                                    updateTransactionDraft(
+                                      etfDraft.id,
+                                      transactionDraft.id,
+                                      "date",
+                                      event.target.value
+                                    )
+                                  }
+                                />
+                              </label>
+
+                              <label className="editor-field">
+                                <span>Tipo</span>
+                                <select
+                                  value={transactionDraft.type}
+                                  onChange={(event) =>
+                                    updateTransactionDraft(
+                                      etfDraft.id,
+                                      transactionDraft.id,
+                                      "type",
+                                      event.target.value
+                                    )
+                                  }
+                                >
+                                  <option value="buy">buy</option>
+                                  <option value="sell">sell</option>
+                                </select>
+                              </label>
+
+                              <label className="editor-field">
+                                <span>Quote</span>
+                                <input
+                                  type="number"
+                                  step="0.0001"
+                                  min="0"
+                                  value={transactionDraft.shares}
+                                  onChange={(event) =>
+                                    updateTransactionDraft(
+                                      etfDraft.id,
+                                      transactionDraft.id,
+                                      "shares",
+                                      event.target.value
+                                    )
+                                  }
+                                />
+                              </label>
+
+                              <label className="editor-field">
+                                <span>Prezzo</span>
+                                <input
+                                  type="number"
+                                  step="0.0001"
+                                  min="0"
+                                  value={transactionDraft.price}
+                                  onChange={(event) =>
+                                    updateTransactionDraft(
+                                      etfDraft.id,
+                                      transactionDraft.id,
+                                      "price",
+                                      event.target.value
+                                    )
+                                  }
+                                />
+                              </label>
+
+                              <label className="editor-field">
+                                <span>Fee</span>
+                                <input
+                                  type="number"
+                                  step="0.0001"
+                                  min="0"
+                                  value={transactionDraft.fees}
+                                  onChange={(event) =>
+                                    updateTransactionDraft(
+                                      etfDraft.id,
+                                      transactionDraft.id,
+                                      "fees",
+                                      event.target.value
+                                    )
+                                  }
+                                />
+                              </label>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </section>
+
+        {hasTrackedEtfs ? (
+          <>
+            <section className="content-grid">
+              <article className="panel">
+                <div className="panel-body">
+                  <div className="panel-header">
+                    <div>
+                      <h2 className="panel-title">Traiettoria del portafoglio</h2>
+                      <p className="panel-copy">
+                        Confronto fra ricchezza cumulata e contributi netti. La linea piena somma
+                        valore attuale, vendite e dividendi incassati.
+                      </p>
+                    </div>
+
+                    <div className="legend">
+                      <span className="legend-chip">
+                        <span className="legend-dot" style={{ background: "var(--text)" }} />
+                        Ricchezza
+                      </span>
+                      <span className="legend-chip">
+                        <span className="legend-dot" style={{ background: "var(--accent)" }} />
+                        Contributi netti
+                      </span>
+                    </div>
+                  </div>
+
+                  <PerformanceChart data={analysis.history} currency={analysis.baseCurrency} />
+                </div>
+              </article>
+
+              <article className="panel">
+                <div className="panel-body">
+                  <div className="panel-header">
+                    <div>
+                      <h2 className="panel-title">Allocazione corrente</h2>
+                      <p className="panel-copy">
+                        Peso attuale delle posizioni aperte sul valore complessivo del portafoglio.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="allocation-list">
+                    {analysis.allocation.map((item) => (
+                      <div className="allocation-row" key={item.id}>
+                        <div className="allocation-head">
+                          <strong>{item.ticker}</strong>
+                          <span>{formatPercent(item.weight)}</span>
+                        </div>
+                        <div className="allocation-track" aria-hidden="true">
+                          <div className="allocation-fill" style={{ width: `${item.weight * 100}%` }} />
+                        </div>
+                        <span className="allocation-name">
+                          {item.name} · {formatCurrency(item.currentValue, analysis.baseCurrency)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </article>
+            </section>
+
+            <section className="content-grid">
+              <article className="panel">
+                <div className="panel-body">
+                  <div className="panel-header">
+                    <div>
+                      <h2 className="panel-title">Drawdown del portafoglio</h2>
+                      <p className="panel-copy">
+                        Mostra quanto il portafoglio si e allontanato dai suoi massimi nel tempo. E
+                        utile per visualizzare la profondita e la durata delle fasi di stress.
+                      </p>
+                    </div>
+                  </div>
+
+                  <PortfolioDrawdownChart data={analysis.history} />
+                </div>
+              </article>
+
+              <article className="panel">
+                <div className="panel-body">
+                  <div className="panel-header">
+                    <div>
+                      <h2 className="panel-title">Rischio vs rendimento</h2>
+                      <p className="panel-copy">
+                        Confronta gli ETF per volatilita annua e rendimento annualizzato. Le bolle piu
+                        grandi pesano di piu sul valore attuale del portafoglio.
+                      </p>
+                    </div>
+                  </div>
+
+                  <PortfolioRiskReturnChart etfs={analysis.etfs} />
+                </div>
+              </article>
+            </section>
+
+            <section className="panel">
+              <div className="panel-body">
+                <div className="panel-header">
+                  <div>
+                    <h2 className="panel-title">Confronto crescita ETF</h2>
+                    <p className="panel-copy">
+                      Normalizza l'andamento dei principali ETF e rende immediato vedere quali stanno
+                      guidando la performance e quali stanno restando indietro.
+                    </p>
+                  </div>
+                </div>
+
+                <PortfolioEtfComparisonChart etfs={analysis.etfs} />
+              </div>
+            </section>
+
+            <section className="content-grid">
+              <article className="panel">
+                <div className="panel-body">
+                  <div className="panel-header">
+                    <div>
+                      <h2 className="panel-title">Indicatori rapidi</h2>
+                      <p className="panel-copy">
+                        Un riepilogo delle posizioni che stanno guidando rischio e rendimento.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="insight-list">
+                    <div className="insight-row">
+                      <span className="insight-label">ETF migliore per TWR</span>
+                      <strong>
+                        {analysis.bestPerformer.ticker} · {formatPercent(analysis.bestPerformer.timeWeightedReturn)}
+                      </strong>
+                    </div>
+                    <div className="insight-row">
+                      <span className="insight-label">ETF peggiore per TWR</span>
+                      <strong>
+                        {analysis.worstPerformer.ticker} · {formatPercent(analysis.worstPerformer.timeWeightedReturn)}
+                      </strong>
+                    </div>
+                    <div className="insight-row">
+                      <span className="insight-label">Maggiore contributo al profitto</span>
+                      <strong>
+                        {analysis.topProfitContributor.ticker} ·{" "}
+                        {formatCurrency(analysis.topProfitContributor.totalProfit, analysis.baseCurrency)}
+                      </strong>
+                    </div>
+                    <div className="insight-row">
+                      <span className="insight-label">ETF piu volatile</span>
+                      <strong>
+                        {analysis.mostVolatile.ticker} · {formatPercent(analysis.mostVolatile.volatility)}
+                      </strong>
+                    </div>
+                  </div>
+                </div>
+              </article>
+
+              <article className="panel">
+                <div className="panel-body">
+                  <div className="panel-header">
+                    <div>
+                      <h2 className="panel-title">Metadati del dataset</h2>
+                      <p className="panel-copy">
+                        Informazioni utili per capire copertura temporale e densita del JSON caricato.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="meta-list">
+                    <div className="meta-row">
+                      <span className="meta-label">Portafoglio</span>
+                      <strong>{analysis.name}</strong>
+                    </div>
+                    <div className="meta-row">
+                      <span className="meta-label">Valuta base</span>
+                      <strong>{analysis.baseCurrency}</strong>
+                    </div>
+                    <div className="meta-row">
+                      <span className="meta-label">Finestra storica</span>
+                      <strong>
+                        {formatDateLabel(analysis.firstDate)} - {formatDateLabel(analysis.lastDate)}
+                      </strong>
+                    </div>
+                    <div className="meta-row">
+                      <span className="meta-label">ETF tracciati</span>
+                      <strong>{analysis.etfCount}</strong>
+                    </div>
+                    <div className="meta-row">
+                      <span className="meta-label">Portafoglio iniziale</span>
+                      <strong>
+                        {formatCurrency(analysis.initialPortfolioMarketValue, analysis.baseCurrency)}
+                      </strong>
+                    </div>
+                    {analysis.initialPortfolioDate ? (
+                      <div className="meta-row">
+                        <span className="meta-label">Data iniziale</span>
+                        <strong>{formatDateLabel(analysis.initialPortfolioDate)}</strong>
+                      </div>
+                    ) : null}
+                    <div className="meta-row">
+                      <span className="meta-label">Punti storici totali</span>
+                      <strong>{formatNumber(analysis.historyPoints)}</strong>
+                    </div>
+                    <div className="meta-row">
+                      <span className="meta-label">Contributi lordi</span>
+                      <strong>{formatCurrency(analysis.totalContributed, analysis.baseCurrency)}</strong>
+                    </div>
+                    {analysis.notes ? (
+                      <div className="meta-row">
+                        <span className="meta-label">Note</span>
+                        <strong>{analysis.notes}</strong>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              </article>
+            </section>
+
+            <section className="panel">
+              <div className="panel-body">
+                <div className="panel-header">
+                  <div>
+                    <h2 className="panel-title">Analisi ETF</h2>
+                    <p className="panel-copy">
+                      Per ogni strumento sono mostrati valore, rendimento, rischio e impatto sul
+                      portafoglio attuale.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="table-wrap">
+                  <table className="portfolio-table">
+                    <thead>
+                      <tr>
+                        <th>Strumento</th>
+                        <th>Quote</th>
+                        <th>Valore attuale</th>
+                        <th>Profitto totale</th>
+                        <th>TWR</th>
+                        <th>Totale %</th>
+                        <th>Volatilita</th>
+                        <th>Drawdown</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {analysis.etfs.map((etf) => (
+                        <tr key={etf.id}>
+                          <td>
+                            <strong>{etf.ticker}</strong>
+                            <span className="instrument-meta">{etf.name}</span>
+                            <span className="instrument-meta">
+                              {etf.isin ? `${etf.isin} · ` : ""}
+                              {etf.assetClass}
+                            </span>
+                            {etf.initialPosition ? (
+                              <span className="instrument-meta">
+                                Iniziale {formatNumber(etf.initialPosition.shares)} quote da{" "}
+                                {formatDateLabel(etf.initialPosition.date)}
+                              </span>
+                            ) : null}
+                          </td>
+                          <td>
+                            <strong>{formatNumber(etf.shares)}</strong>
+                            <span className="instrument-meta">
+                              Prezzo {formatCurrency(etf.currentPrice, analysis.baseCurrency)}
+                            </span>
+                          </td>
+                          <td>
+                            <strong>{formatCurrency(etf.currentValue, analysis.baseCurrency)}</strong>
+                            <span className="instrument-meta">
+                              <span className="pill">{formatPercent(etf.weight)}</span>
+                            </span>
+                          </td>
+                          <td className={toneClass(etf.totalProfit)}>
+                            <strong>{formatCurrency(etf.totalProfit, analysis.baseCurrency)}</strong>
+                            <span className="instrument-meta">
+                              Realizzato {formatCurrency(etf.realizedPnL, analysis.baseCurrency)}
+                            </span>
+                          </td>
+                          <td className={toneClass(etf.timeWeightedReturn)}>
+                            <strong>{formatPercent(etf.timeWeightedReturn)}</strong>
+                            <span className="instrument-meta">
+                              Annuo {formatPercent(etf.annualizedReturn)}
+                            </span>
+                          </td>
+                          <td className={toneClass(etf.totalReturn)}>
+                            <strong>{formatPercent(etf.totalReturn)}</strong>
+                            <span className="instrument-meta">
+                              Dividendi {formatCurrency(etf.dividendsReceived, analysis.baseCurrency)}
+                            </span>
+                          </td>
+                          <td>
+                            <strong>{formatPercent(etf.volatility)}</strong>
+                            <span className="instrument-meta">
+                              Fee {formatCurrency(etf.feesPaid, analysis.baseCurrency)}
+                            </span>
+                          </td>
+                          <td className={toneClass(-etf.maxDrawdown)}>
+                            <strong>{formatPercent(-etf.maxDrawdown)}</strong>
+                            <span className="instrument-meta">
+                              Costo residuo {formatCurrency(etf.costBasis, analysis.baseCurrency)}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+          </>
+        ) : (
+          <section className="panel">
+            <div className="panel-body empty-state">
+              <h2 className="panel-title">Portafoglio vuoto</h2>
+              <p className="panel-copy">
+                L'app parte con 0 ETF. Aggiungi il primo strumento dal pannello qui sopra, compila
+                la posizione iniziale e premi `Applica portafoglio iniziale`.
+              </p>
+              <p className="panel-copy">
+                Quando avrai almeno un ETF, grafici, allocazione e tabella analitica compariranno
+                automaticamente.
+              </p>
+            </div>
+          </section>
+        )}
 
         <section className="panel">
           <div className="panel-body">
