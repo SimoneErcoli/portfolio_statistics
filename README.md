@@ -8,6 +8,8 @@ Dashboard Next.js per analizzare un portafoglio di ETF partendo da un file JSON 
 - storico prezzi/performance per ogni ETF
 - dividendi opzionali per rendimenti piu accurati
 
+L'interfaccia segue una direzione visiva piu elegante finanziaria, con palette avorio/navy/ottone, superfici sobrie e tipografia piu editoriale per le intestazioni.
+
 ## Avvio
 
 ```bash
@@ -22,6 +24,9 @@ All'avvio l'app parte da un portafoglio vuoto con `0` ETF, cosi l'utente puo cos
 Da interfaccia puoi:
 - aggiungere ETF al portafoglio iniziale
 - aggiungere transazioni `buy` e `sell` agli ETF gia presenti nel dataset attivo
+- partire da `0` ETF e costruire il portafoglio da zero
+- esportare il JSON corrente con tutte le modifiche fatte da interfaccia
+- consultare grafici aggiuntivi come drawdown, rischio/rendimento e confronto crescita ETF
 
 ## Struttura del JSON
 
@@ -81,6 +86,14 @@ Il progetto include un dataset di esempio in `src/data/sample-portfolio.json`, s
 - volatilita annualizzata
 - max drawdown
 - analisi per singolo ETF: quote, costo residuo, P/L realizzato e non realizzato, contributo, allocazione
+
+## Visualizzazioni incluse
+
+- andamento del portafoglio nel tempo
+- allocazione corrente per ETF
+- drawdown del portafoglio
+- confronto crescita ETF
+- rischio vs rendimento dei singoli ETF
 
 ## Nota
 
